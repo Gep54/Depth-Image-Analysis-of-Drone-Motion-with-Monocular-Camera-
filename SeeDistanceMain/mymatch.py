@@ -3,6 +3,11 @@ import pandas as pd
 
 
 def edge_preprocess(image):
+    """
+
+    :param image:
+    :return:
+    """
     # Convert to grayscale
     gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
     edges = cv.Canny(gray, threshold1=50, threshold2=150)
@@ -10,6 +15,11 @@ def edge_preprocess(image):
     return edges
 
 def features_ORB(edges):
+    """
+
+    :param edges:
+    :return:
+    """
     # ORB feature detector
     orb = cv.ORB_create()
 
