@@ -21,6 +21,16 @@ class DatasetBundle:
     poses: pd.DataFrame
 
 
+def dataset_summary(bundle: DatasetBundle) -> dict[str, Any]:
+    """Return a compact summary of the loaded dataset."""
+    return {
+        "Nu. of frames": len(bundle.frames),
+        "intrinsics shape": bundle.intrinsics.shape,
+        "pose_rows": len(bundle.poses),
+        "first_frame": bundle.frames[0][0] if bundle.frames else None,
+    }
+
+
 class DatasetLoader:
     """Loader object responsible for reading and validating all input data."""
 
@@ -103,16 +113,7 @@ class DatasetLoader:
     def load_dataset(self) -> DatasetBundle:
         """Load all inputs and return them as a bundle."""
         return DatasetBundle(
-            frames=self.load_frames(),
-            intrinsics=self.load_intrinsics(),
-            poses=self.load_poses(),
+            frames=self._load_frames(),
+            intrinsics=self._load_intrinsics(),
+            poses=self._load_poses(),
         )
-
-    def dataset_summary(self, bundle: DatasetBundle) -> dict[str, Any]:
-        """Return a compact summary of the loaded dataset."""
-        return {
-            "Nu. of frames": len(bundle.frames),
-            "intrinsics shape": bundle.intrinsics.shape,
-            "pose_rows": len(bundle.poses),
-            "first_frame": bundle.frames[0][0] if bundle.frames else None,
-        }

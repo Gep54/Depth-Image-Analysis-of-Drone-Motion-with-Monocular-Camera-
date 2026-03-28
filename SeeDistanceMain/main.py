@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from data import DatasetLoader
+from data import DatasetLoader, dataset_summary
 from logging import Logger
-
+from mymatch import FeatureMatcher
 
 logger = Logger(name='main')
 
@@ -20,6 +20,7 @@ class SeeDistanceApp:
             intrinsics_path: str | Path,
             sync_path: str | Path,
             poses_path: str | Path,
+            model: str
     ) -> None:
         """Initialize the application and load the required input data.
 
@@ -33,6 +34,7 @@ class SeeDistanceApp:
         self.intrinsics_path = Path(intrinsics_path)
         self.sync_path = Path(sync_path)
         self.poses_path = Path(poses_path)
+        self.model = model
 
         self.dataset = None
 
@@ -47,7 +49,11 @@ class SeeDistanceApp:
             intrinsics_path=self.intrinsics_path,
             poses_path=self.poses_path,)
         self.dataset = loader.load_dataset()
+        log_msg = f"Dataset loaded successfully: {dataset_summary(self.dataset)}"
+        logger.info(log_msg)
 
-        log_msg = f"Dataset loaded successfully: {self.dataset.dataset_summary(self.dataset)}"
+        matcher = FeatureMatcher(model=self.model)
 
-
+        for i, frame in enumerate(self.dataset.frames[:-1]):
+            next_frame = self.dataset.frames[i + 1]
+            matches = matcher.run(frame, next_frame)
