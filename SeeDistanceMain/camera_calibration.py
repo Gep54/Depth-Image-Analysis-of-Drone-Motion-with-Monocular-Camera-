@@ -14,7 +14,7 @@ def calibrate_camera_chessboard():
     objpoints = []  # 3d point in real world space
     imgpoints = []  # 2d points in image plane.
 
-    images = glob.glob('obrazky/sachovnice/*.jpg')
+    images = glob.glob('PicsbyOldPhone/sachovnice/*.jpg')
     size = len(images)
     counter = 1
     for fname in images:

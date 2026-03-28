@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+*.iml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Outputs
+*.csv
+*.jpg
+*.png
