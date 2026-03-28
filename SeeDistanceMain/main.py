@@ -1,6 +1,10 @@
 from pathlib import Path
 
 from data import DatasetLoader
+from logging import Logger
+
+
+logger = Logger(name='main')
 
 
 class SeeDistanceApp:
