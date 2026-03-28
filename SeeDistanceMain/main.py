@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from data import load_dataset
+from data import DatasetLoader
 
 
 class SeeDistanceApp:
@@ -38,15 +38,12 @@ class SeeDistanceApp:
         The individual processing steps will be added later. For now, this
         method loads the dataset and prepares the application state.
         """
-        self.dataset = load_dataset(
+        loader = DatasetLoader(
             frames_dir=self.frames_dir,
             intrinsics_path=self.intrinsics_path,
-            sync_path=self.sync_path,
-            poses_path=self.poses_path,
-        )
+            poses_path=self.poses_path,)
+        self.dataset = loader.load_dataset()
 
-        print("Dataset loaded successfully")
-        print(f"Frames: {len(self.dataset.frames)}")
-        print(f"Intrinsics shape: {self.dataset.intrinsics.shape}")
-        print(f"Synchronization rows: {len(self.dataset.sync)}")
-        print(f"Pose rows: {len(self.dataset.poses)}")
+        log_msg = f"Dataset loaded successfully: {self.dataset.dataset_summary(self.dataset)}"
+
+
