@@ -1,167 +1,138 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2 as cv
 import numpy as np
 import pandas as pd
 
 
-@dataclass
-class DatasetBundle:
-    """Container for the dataset inputs required by the application."""
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+SUPPORTED_TABLE_EXTENSIONS = {".csv", ".tsv"}
+SUPPORTED_INTRINSICS_EXTENSIONS = {".npy", ".txt", ".csv"}
 
-    frames: list
+
+@dataclass(slots=True)
+class DatasetBundle:
+    """Container holding all dataset inputs used by the application."""
+
+    frames: list[tuple[str, np.ndarray]]
     intrinsics: np.ndarray
     sync: pd.DataFrame
     poses: pd.DataFrame
 
 
-def load_frames(frames_dir: Path):
-    """Load all supported image frames from a directory.
+class DatasetLoader:
+    """Loader object responsible for reading and validating all input data."""
 
-    Args:
-        frames_dir: Directory containing image files.
+    def __init__(
+        self,
+        frames_dir: str | Path,
+        intrinsics_path: str | Path,
+        sync_path: str | Path,
+        poses_path: str | Path,
+    ) -> None:
+        """Store input paths for later loading.
 
-    Returns:
-        A list of tuples `(filename, image)` for each readable frame.
+        Args:
+            frames_dir: Directory containing image frames.
+            intrinsics_path: Path to camera intrinsics.
+            sync_path: Path to time synchronization data.
+            poses_path: Path to relative pose estimates.
+        """
+        self.frames_dir = Path(frames_dir)
+        self.intrinsics_path = Path(intrinsics_path)
+        self.sync_path = Path(sync_path)
+        self.poses_path = Path(poses_path)
 
-    Raises:
-        FileNotFoundError: If the directory contains no supported images or a
-            frame cannot be read.
-    """
-    image_paths = sorted(
-        [
-            p for p in frames_dir.iterdir()
-            if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-        ]
-    )
-    if not image_paths:
-        raise FileNotFoundError(f"No image frames found in {frames_dir}")
+    def load_frames(self) -> list[tuple[str, np.ndarray]]:
+        """Load all supported image frames from the frames directory."""
+        if not self.frames_dir.exists():
+            raise FileNotFoundError(f"Frames directory does not exist: {self.frames_dir}")
 
-    frames = []
-    for path in image_paths:
-        image = cv.imread(str(path), cv.IMREAD_COLOR)
-        if image is None:
-            raise FileNotFoundError(f"Could not read image: {path}")
-        frames.append((path.name, image))
-    return frames
+        image_paths = sorted(
+            path for path in self.frames_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        )
 
+        if not image_paths:
+            raise FileNotFoundError(f"No supported image frames found in {self.frames_dir}")
 
-def load_intrinsics(k_path: Path):
-    """Load the camera intrinsic matrix from disk.
+        frames: list[tuple[str, np.ndarray]] = []
+        for path in image_paths:
+            image = cv.imread(str(path), cv.IMREAD_COLOR)
+            if image is None:
+                raise FileNotFoundError(f"Could not read image: {path}")
+            frames.append((path.name, image))
 
-    Supported formats are `.npy`, `.txt`, and `.csv`.
+        return frames
 
-    Args:
-        k_path: Path to the intrinsic matrix file.
+    def load_intrinsics(self) -> np.ndarray:
+        """Load the camera intrinsic matrix from disk."""
+        if not self.intrinsics_path.exists():
+            raise FileNotFoundError(f"Intrinsics file does not exist: {self.intrinsics_path}")
 
-    Returns:
-        A 3x3 NumPy array representing camera intrinsics.
+        suffix = self.intrinsics_path.suffix.lower()
 
-    Raises:
-        ValueError: If the file format is unsupported or the loaded matrix is
-            not 3x3.
-    """
-    suffix = k_path.suffix.lower()
+        if suffix == ".npy":
+            intrinsics = np.load(self.intrinsics_path)
+        elif suffix == ".txt":
+            intrinsics = np.loadtxt(self.intrinsics_path)
+        elif suffix == ".csv":
+            intrinsics = np.loadtxt(self.intrinsics_path, delimiter=",")
+        else:
+            raise ValueError("Intrinsics must be stored as .npy, .txt, or .csv")
 
-    if suffix == ".npy":
-        K = np.load(k_path)
-    elif suffix == ".txt":
-        K = np.loadtxt(k_path)
-    elif suffix == ".csv":
-        K = np.loadtxt(k_path, delimiter=",")
-    else:
-        raise ValueError("Intrinsics must be stored as .npy, .txt, or .csv")
+        if intrinsics.shape != (3, 3):
+            raise ValueError(
+                f"Camera intrinsics must be a 3x3 matrix, got shape {intrinsics.shape}"
+            )
 
-    if K.shape != (3, 3):
-        raise ValueError(f"Camera intrinsics must be a 3x3 matrix, got shape {K.shape}")
+        return intrinsics
 
-    return K
+    def load_sync(self) -> pd.DataFrame:
+        """Load time synchronization information."""
+        if not self.sync_path.exists():
+            raise FileNotFoundError(f"Synchronization file does not exist: {self.sync_path}")
 
+        suffix = self.sync_path.suffix.lower()
 
-def load_sync(sync_path: Path):
-    """Load time synchronization information from a tabular file.
+        if suffix == ".csv":
+            return pd.read_csv(self.sync_path)
+        if suffix == ".tsv":
+            return pd.read_csv(self.sync_path, sep="\t")
 
-    Args:
-        sync_path: Path to the synchronization file.
+        raise ValueError("Time synchronization file must be .csv or .tsv")
 
-    Returns:
-        A pandas DataFrame containing synchronization data.
+    def load_poses(self) -> pd.DataFrame:
+        """Load relative pose estimates from disk."""
+        if not self.poses_path.exists():
+            raise FileNotFoundError(f"Pose file does not exist: {self.poses_path}")
 
-    Raises:
-        ValueError: If the file format is unsupported.
-    """
-    suffix = sync_path.suffix.lower()
+        suffix = self.poses_path.suffix.lower()
 
-    if suffix == ".csv":
-        return pd.read_csv(sync_path)
-    if suffix == ".tsv":
-        return pd.read_csv(sync_path, sep="\t")
+        if suffix == ".csv":
+            return pd.read_csv(self.poses_path)
+        if suffix == ".tsv":
+            return pd.read_csv(self.poses_path, sep="\t")
 
-    raise ValueError("Time synchronization file must be .csv or .tsv")
+        raise ValueError("Relative pose file must be .csv or .tsv")
 
+    def load_dataset(self) -> DatasetBundle:
+        """Load all inputs and return them as a bundle."""
+        return DatasetBundle(
+            frames=self.load_frames(),
+            intrinsics=self.load_intrinsics(),
+            sync=self.load_sync(),
+            poses=self.load_poses(),
+        )
 
-def load_poses(poses_path: Path):
-    """Load relative pose estimates from a tabular file.
-
-    Args:
-        poses_path: Path to the relative pose file.
-
-    Returns:
-        A pandas DataFrame containing relative pose estimates.
-
-    Raises:
-        ValueError: If the file format is unsupported.
-    """
-    suffix = poses_path.suffix.lower()
-
-    if suffix == ".csv":
-        return pd.read_csv(poses_path)
-    if suffix == ".tsv":
-        return pd.read_csv(poses_path, sep="\t")
-
-    raise ValueError("Relative pose file must be .csv or .tsv")
-
-
-def load_dataset(frames_dir: Path, intrinsics_path: Path, sync_path: Path, poses_path: Path):
-    """Load all dataset inputs into a single bundle.
-
-    Args:
-        frames_dir: Directory containing image frames.
-        intrinsics_path: Path to camera intrinsics.
-        sync_path: Path to time synchronization data.
-        poses_path: Path to relative pose estimates.
-
-    Returns:
-        A DatasetBundle containing frames, intrinsics, synchronization data,
-        and pose estimates.
-    """
-    frames = load_frames(frames_dir)
-    intrinsics = load_intrinsics(intrinsics_path)
-    sync = load_sync(sync_path)
-    poses = load_poses(poses_path)
-
-    return DatasetBundle(
-        frames=frames,
-        intrinsics=intrinsics,
-        sync=sync,
-        poses=poses,
-    )
-
-
-def dataset_summary(bundle: DatasetBundle):
-    """Build a small summary of the loaded dataset.
-
-    Args:
-        bundle: Loaded dataset bundle.
-
-    Returns:
-        A dictionary containing basic dataset statistics.
-    """
-    return {
-        "frames": len(bundle.frames),
-        "intrinsics_shape": bundle.intrinsics.shape,
-        "sync_rows": len(bundle.sync),
-        "pose_rows": len(bundle.poses),
-        "first_frame": bundle.frames[0][0] if bundle.frames else None,
-    }
+    def dataset_summary(self, bundle: DatasetBundle) -> dict[str, Any]:
+        """Return a compact summary of the loaded dataset."""
+        return {
+            "frames": len(bundle.frames),
+            "intrinsics_shape": bundle.intrinsics.shape,
+            "sync_rows": len(bundle.sync),
+            "pose_rows": len(bundle.poses),
+            "first_frame": bundle.frames[0][0] if bundle.frames else None,
+        }
