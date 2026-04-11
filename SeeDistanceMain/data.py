@@ -79,6 +79,38 @@ def load_intrinsics(k_path: Path):
     return K
 
 
+def load_distortion(dist_path: Path | None) -> np.ndarray:
+    """Load lens distortion coefficients for use with :func:`cv.undistort`.
+
+    If ``dist_path`` is ``None``, returns five zeros (no distortion).
+
+    Supported file formats are ``.npy`` and ``.txt`` (whitespace-separated).
+    The array is flattened; OpenCV supports 4, 5, 8, 12, or 14 coefficients.
+    """
+    if dist_path is None:
+        return np.zeros(5, dtype=np.float64)
+
+    path = Path(dist_path)
+    suffix = path.suffix.lower()
+    if suffix == ".npy":
+        d = np.load(path).astype(np.float64).reshape(-1)
+    elif suffix == ".txt":
+        d = np.loadtxt(path).astype(np.float64).reshape(-1)
+    else:
+        raise ValueError("Distortion coefficients must be stored as .npy or .txt")
+
+    if d.size == 0:
+        raise ValueError("Distortion file is empty")
+    return d
+
+
+def undistort_image_bgr(image: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
+    """Undistort a BGR image using intrinsics ``K`` and distortion ``dist``."""
+    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(dist, dtype=np.float64).reshape(-1, 1)
+    return cv.undistort(image, K, dist)
+
+
 def load_sync(sync_path: Path):
     """Load time synchronization information from a tabular file.
 

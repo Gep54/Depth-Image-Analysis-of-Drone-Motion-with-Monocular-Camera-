@@ -4,6 +4,7 @@ from pathlib import Path
 import cv2 as cv
 
 from camera_calibration import calibrate_camera_chessboard
+from data import load_distortion, load_frames, load_intrinsics, load_sync
 from mymatch import (
     edge_preprocess,
     features_ORB,
@@ -14,6 +15,9 @@ from mymatch import (
     save_images_matched_features,
     matches_to_df,
 )
+from sequence_match import consecutive_pair_match_stats
+from incremental_sfm import run_incremental_sfm, save_incremental_npz
+from two_view import reconstruct_two_view, save_two_view_npz, write_ply_ascii
 
 
 def load_image(image_path: str):
@@ -84,6 +88,126 @@ def run_calibrate(_args):
     print(dist)
 
 
+def run_sequence_match(args):
+    frames_dir = Path(args.frames_dir)
+    frames = load_frames(frames_dir)
+    K = load_intrinsics(Path(args.intrinsics))
+    dist = load_distortion(Path(args.dist) if args.dist else None)
+
+    extractor = get_feature_extractor(args.feature)
+    preprocess = edge_preprocess if args.preprocess == "edges" else lambda x: x
+
+    df = consecutive_pair_match_stats(
+        frames,
+        feature_extractor=extractor,
+        preprocess=preprocess,
+        feature_name=args.feature,
+        K=K,
+        dist=dist,
+        undistort=not args.no_undistort,
+    )
+
+    out = Path(args.output) if args.output else None
+    if out:
+        df.to_csv(out, index=False)
+        print(f"Wrote statistics to {out}")
+
+    print(df.to_string(index=False))
+    print(f"Pairs processed: {len(df)}")
+
+
+def run_two_view(args):
+    K = load_intrinsics(Path(args.intrinsics))
+    dist = load_distortion(Path(args.dist) if args.dist else None)
+
+    if args.frames_dir:
+        frames = load_frames(Path(args.frames_dir))
+        pair = args.pair_index
+        if pair < 0 or pair + 1 >= len(frames):
+            raise SystemExit(f"pair_index {pair} invalid for {len(frames)} frames (need 0 .. {len(frames) - 2})")
+        _, img1 = frames[pair]
+        _, img2 = frames[pair + 1]
+    elif args.image1:
+        if not args.image2:
+            raise SystemExit("--image2 is required when using --image1")
+        img1 = load_image(args.image1)
+        img2 = load_image(args.image2)
+    else:
+        raise SystemExit("Provide --frames-dir or both --image1 and --image2")
+
+    extractor = get_feature_extractor(args.feature)
+    preprocess = edge_preprocess if args.preprocess == "edges" else lambda x: x
+
+    result = reconstruct_two_view(
+        img1,
+        img2,
+        K,
+        dist,
+        feature_extractor=extractor,
+        preprocess=preprocess,
+        feature_name=args.feature,
+        undistort=not args.no_undistort,
+        ransac_prob=args.ransac_prob,
+        ransac_threshold_px=args.ransac_threshold,
+    )
+
+    if args.output_ply:
+        write_ply_ascii(args.output_ply, result.points_3d, result.colors_bgr)
+        print(f"Wrote PLY: {args.output_ply}")
+    if args.output_npz:
+        save_two_view_npz(args.output_npz, result, K)
+        print(f"Wrote NPZ: {args.output_npz}")
+
+    print(f"Inlier 3D points: {result.n_inliers}")
+    print(f"Mean reprojection error (px): {result.mean_reproj_error_px:.4f}")
+
+
+def run_incremental_cli(args):
+    frames = load_frames(Path(args.frames_dir))
+    K = load_intrinsics(Path(args.intrinsics))
+    dist = load_distortion(Path(args.dist) if args.dist else None)
+
+    sync_df = None
+    if args.sync:
+        sync_df = load_sync(Path(args.sync))
+
+    extractor = get_feature_extractor(args.feature)
+    preprocess = edge_preprocess if args.preprocess == "edges" else lambda x: x
+
+    result = run_incremental_sfm(
+        frames,
+        K,
+        dist,
+        feature_extractor=extractor,
+        preprocess=preprocess,
+        feature_name=args.feature,
+        undistort=not args.no_undistort,
+        two_view_pair_index=args.pair_index,
+        ransac_prob=args.ransac_prob,
+        ransac_threshold_px=args.ransac_threshold,
+        pnp_reproj_threshold=args.pnp_reproj_threshold,
+        sync_df=sync_df,
+        sync_default_weight=args.sync_default_weight,
+        run_bundle_adjustment=not args.no_bundle,
+        ba_verbose=args.ba_verbose,
+    )
+
+    if args.output_ply:
+        write_ply_ascii(args.output_ply, result.points_3d, result.colors_bgr)
+        print(f"Wrote PLY: {args.output_ply}")
+    if args.output_npz:
+        save_incremental_npz(args.output_npz, result, K)
+        print(f"Wrote NPZ: {args.output_npz}")
+
+    print(f"3D points: {result.points_3d.shape[0]}")
+    print(f"Frames: {len(result.frame_names)}")
+    if result.bundle_cost is not None:
+        print(f"Bundle adjustment final cost: {result.bundle_cost:.6f}")
+    else:
+        print("Bundle adjustment skipped")
+    print(f"PnP inliers (last frame): {result.pnp_inliers_last_frame}")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="see-distance",
@@ -126,6 +250,212 @@ def build_parser():
         help="Show matched features in a window",
     )
     match_parser.set_defaults(func=run_match)
+
+    seq_parser = subparsers.add_parser(
+        "sequence-match",
+        help="Step 1: load a frame folder + intrinsics, optionally undistort, "
+        "match consecutive pairs, export statistics",
+    )
+    seq_parser.add_argument(
+        "--frames-dir",
+        required=True,
+        type=str,
+        help="Directory of images (sorted by filename)",
+    )
+    seq_parser.add_argument(
+        "--intrinsics",
+        required=True,
+        type=str,
+        help="Camera matrix K (.npy, .txt, or .csv)",
+    )
+    seq_parser.add_argument(
+        "--dist",
+        type=str,
+        default=None,
+        help="Distortion coefficients (.npy or .txt); omit for no distortion",
+    )
+    seq_parser.add_argument(
+        "--no-undistort",
+        action="store_true",
+        help="Skip cv.undistort (ignore --dist for geometry; matching on raw images)",
+    )
+    seq_parser.add_argument(
+        "--feature",
+        default="ORB",
+        choices=["ORB", "SIFT", "KAZE"],
+        help="Feature detector",
+    )
+    seq_parser.add_argument(
+        "--preprocess",
+        default="edges",
+        choices=["edges", "none"],
+        help="Preprocessing before detection",
+    )
+    seq_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Write match statistics CSV to this path",
+    )
+    seq_parser.set_defaults(func=run_sequence_match)
+
+    tv_parser = subparsers.add_parser(
+        "two-view",
+        help="Step 2: two-view SfM — essential matrix, pose, triangulation, export cloud",
+    )
+    src = tv_parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--image1", default=None, help="First image path (use with --image2)")
+    src.add_argument(
+        "--frames-dir",
+        default=None,
+        type=str,
+        help="Directory of images; uses frames[pair_index] and frames[pair_index+1]",
+    )
+    tv_parser.add_argument(
+        "--image2",
+        default=None,
+        help="Second image path (required with --image1)",
+    )
+    tv_parser.add_argument(
+        "--pair-index",
+        type=int,
+        default=0,
+        help="When using --frames-dir: index i matches frames i and i+1 (default 0)",
+    )
+    tv_parser.add_argument(
+        "--intrinsics",
+        required=True,
+        type=str,
+        help="Camera matrix K (.npy, .txt, or .csv)",
+    )
+    tv_parser.add_argument(
+        "--dist",
+        type=str,
+        default=None,
+        help="Distortion coefficients (.npy or .txt); omit if none",
+    )
+    tv_parser.add_argument(
+        "--no-undistort",
+        action="store_true",
+        help="Detect/match on raw images (geometry still uses K)",
+    )
+    tv_parser.add_argument(
+        "--feature",
+        default="SIFT",
+        choices=["ORB", "SIFT", "KAZE"],
+        help="Feature detector (default SIFT for two-view stability)",
+    )
+    tv_parser.add_argument(
+        "--preprocess",
+        default="none",
+        choices=["edges", "none"],
+        help="Preprocessing before detection (default none for step 2)",
+    )
+    tv_parser.add_argument(
+        "--output-ply",
+        type=str,
+        default=None,
+        help="Write sparse point cloud as ASCII PLY",
+    )
+    tv_parser.add_argument(
+        "--output-npz",
+        type=str,
+        default=None,
+        help="Write points, pose, K, and diagnostics as NPZ",
+    )
+    tv_parser.add_argument(
+        "--ransac-prob",
+        type=float,
+        default=0.999,
+        help="RANSAC confidence for findEssentialMat",
+    )
+    tv_parser.add_argument(
+        "--ransac-threshold",
+        type=float,
+        default=1.0,
+        help="Max epipolar distance in pixels for essential matrix RANSAC",
+    )
+    tv_parser.set_defaults(func=run_two_view)
+
+    inc_parser = subparsers.add_parser(
+        "incremental-sfm",
+        help="Step 3: incremental PnP + triangulation; optional BA with (x,y) sync priors only",
+    )
+    inc_parser.add_argument("--frames-dir", required=True, type=str, help="Ordered image directory")
+    inc_parser.add_argument("--intrinsics", required=True, type=str, help="3×3 K (.npy, .txt, .csv)")
+    inc_parser.add_argument(
+        "--dist",
+        type=str,
+        default=None,
+        help="Distortion .npy or .txt (optional)",
+    )
+    inc_parser.add_argument(
+        "--no-undistort",
+        action="store_true",
+        help="Skip undistortion before features",
+    )
+    inc_parser.add_argument(
+        "--feature",
+        default="SIFT",
+        choices=["ORB", "SIFT", "KAZE"],
+        help="Feature type",
+    )
+    inc_parser.add_argument(
+        "--preprocess",
+        default="none",
+        choices=["edges", "none"],
+        help="Preprocessing",
+    )
+    inc_parser.add_argument(
+        "--pair-index",
+        type=int,
+        default=0,
+        help="Two-view seed is frames[i] and frames[i+1] (must be 0)",
+    )
+    inc_parser.add_argument(
+        "--ransac-prob",
+        type=float,
+        default=0.999,
+        help="Essential matrix RANSAC confidence",
+    )
+    inc_parser.add_argument(
+        "--ransac-threshold",
+        type=float,
+        default=1.0,
+        help="Essential matrix RANSAC threshold (px)",
+    )
+    inc_parser.add_argument(
+        "--pnp-reproj-threshold",
+        type=float,
+        default=8.0,
+        help="solvePnPRansac reprojection threshold (px)",
+    )
+    inc_parser.add_argument(
+        "--sync",
+        type=str,
+        default=None,
+        help="CSV/TSV with image,x,y[,weight|sigma] for planar camera-center priors",
+    )
+    inc_parser.add_argument(
+        "--sync-default-weight",
+        type=float,
+        default=1.0,
+        help="Prior weight if sync row has no weight/sigma column",
+    )
+    inc_parser.add_argument(
+        "--no-bundle",
+        action="store_true",
+        help="Skip bundle adjustment (geometry = incremental only)",
+    )
+    inc_parser.add_argument(
+        "--ba-verbose",
+        type=int,
+        default=0,
+        help="Verbosity for scipy least_squares (0 or 1)",
+    )
+    inc_parser.add_argument("--output-ply", type=str, default=None, help="Sparse colored PLY")
+    inc_parser.add_argument("--output-npz", type=str, default=None, help="NPZ with poses, points, obs")
+    inc_parser.set_defaults(func=run_incremental_cli)
 
     return parser
 
