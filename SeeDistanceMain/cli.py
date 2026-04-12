@@ -16,7 +16,8 @@ from mymatch import (
     matches_to_df,
 )
 from sequence_match import consecutive_pair_match_stats
-from incremental_sfm import run_incremental_sfm, save_incremental_npz
+from incremental_sfm import load_incremental_npz, run_incremental_sfm, save_incremental_npz
+from sfm_export import export_incremental_map
 from two_view import reconstruct_two_view, save_two_view_npz, write_ply_ascii
 
 
@@ -206,6 +207,127 @@ def run_incremental_cli(args):
     else:
         print("Bundle adjustment skipped")
     print(f"PnP inliers (last frame): {result.pnp_inliers_last_frame}")
+
+
+def run_export_map(args):
+    result, K = load_incremental_npz(Path(args.input))
+    paths = export_incremental_map(
+        result,
+        K,
+        Path(args.output_dir),
+        write_ply=not args.no_ply,
+        write_observations_csv=args.observations_csv,
+    )
+    for key, p in paths.items():
+        print(f"{key}: {p}")
+    if result.bundle_cost is not None:
+        print(f"bundle_cost (from NPZ): {result.bundle_cost:.6f}")
+
+
+def run_reconstruct(args):
+    """End-to-end: optional match stats → incremental SfM + BA → robust refine → PLY/NPZ/export."""
+    frames = load_frames(Path(args.frames_dir))
+    K = load_intrinsics(Path(args.intrinsics))
+    dist = load_distortion(Path(args.dist) if args.dist else None)
+
+    extractor = get_feature_extractor(args.feature)
+    preprocess = edge_preprocess if args.preprocess == "edges" else lambda x: x
+
+    if args.match_stats:
+        df = consecutive_pair_match_stats(
+            frames,
+            feature_extractor=extractor,
+            preprocess=preprocess,
+            feature_name=args.feature,
+            K=K,
+            dist=dist,
+            undistort=not args.no_undistort,
+        )
+        Path(args.match_stats).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(args.match_stats, index=False)
+        print(f"Wrote sequence match stats: {args.match_stats}")
+
+    sync_df = None
+    if args.sync:
+        sync_df = load_sync(Path(args.sync))
+
+    result = run_incremental_sfm(
+        frames,
+        K,
+        dist,
+        feature_extractor=extractor,
+        preprocess=preprocess,
+        feature_name=args.feature,
+        undistort=not args.no_undistort,
+        two_view_pair_index=args.pair_index,
+        ransac_prob=args.ransac_prob,
+        ransac_threshold_px=args.ransac_threshold,
+        pnp_reproj_threshold=args.pnp_reproj_threshold,
+        sync_df=sync_df,
+        sync_default_weight=args.sync_default_weight,
+        run_bundle_adjustment=not args.no_bundle,
+        ba_verbose=args.ba_verbose,
+    )
+
+    if not args.no_refine:
+        from refine_map import refine_incremental_bundle
+
+        rmax = args.refine_max_nfev if args.refine_max_nfev > 0 else None
+        result = refine_incremental_bundle(
+            result,
+            K,
+            sync_df=sync_df,
+            sync_default_weight=args.sync_default_weight,
+            loss=args.refine_loss,
+            f_scale=args.refine_f_scale,
+            max_nfev=rmax,
+            verbose=args.ba_verbose,
+        )
+
+    out_ply = Path(args.output_ply)
+    out_ply.parent.mkdir(parents=True, exist_ok=True)
+    write_ply_ascii(out_ply, result.points_3d, result.colors_bgr)
+    print(f"Wrote point cloud (PLY): {out_ply}")
+
+    if args.output_npz:
+        save_incremental_npz(Path(args.output_npz), result, K)
+        print(f"Wrote bundle (NPZ): {args.output_npz}")
+
+    if args.export_dir:
+        paths = export_incremental_map(
+            result,
+            K,
+            Path(args.export_dir),
+            write_ply=not args.export_no_ply,
+            write_observations_csv=args.export_observations_csv,
+        )
+        for key, p in paths.items():
+            print(f"export {key}: {p}")
+
+    print(f"Frames: {len(result.frame_names)}  |  3D points: {result.points_3d.shape[0]}")
+    if result.bundle_cost is not None:
+        print(f"Final bundle cost: {result.bundle_cost:.6f}")
+
+
+def run_refine_map(args):
+    from refine_map import refine_incremental_bundle
+
+    result, K = load_incremental_npz(Path(args.input))
+    sync_df = load_sync(Path(args.sync)) if args.sync else None
+    max_nfev = args.max_nfev if args.max_nfev > 0 else None
+    refined = refine_incremental_bundle(
+        result,
+        K,
+        sync_df=sync_df,
+        sync_default_weight=args.sync_default_weight,
+        loss=args.loss,
+        f_scale=args.f_scale,
+        max_nfev=max_nfev,
+        verbose=args.ba_verbose,
+    )
+    save_incremental_npz(Path(args.output), refined, K)
+    print(f"Wrote {args.output}")
+    print(f"Refinement cost: {refined.bundle_cost:.6f}")
 
 
 def build_parser():
@@ -456,6 +578,225 @@ def build_parser():
     inc_parser.add_argument("--output-ply", type=str, default=None, help="Sparse colored PLY")
     inc_parser.add_argument("--output-npz", type=str, default=None, help="NPZ with poses, points, obs")
     inc_parser.set_defaults(func=run_incremental_cli)
+
+    rec_parser = subparsers.add_parser(
+        "reconstruct",
+        help="Full chain: frames + K + dist → match stats (opt.) → incremental SfM + BA → robust refine → PLY",
+    )
+    rec_parser.add_argument(
+        "--frames-dir",
+        required=True,
+        type=str,
+        help="Directory of ordered images (same as step 1)",
+    )
+    rec_parser.add_argument(
+        "--intrinsics",
+        required=True,
+        type=str,
+        help="Camera matrix K (.npy, .txt, .csv)",
+    )
+    rec_parser.add_argument(
+        "--dist",
+        type=str,
+        default=None,
+        help="Distortion coefficients (.npy or .txt); omit if none",
+    )
+    rec_parser.add_argument(
+        "--output-ply",
+        required=True,
+        type=str,
+        help="Output path for colored sparse point cloud (PLY)",
+    )
+    rec_parser.add_argument(
+        "--output-npz",
+        type=str,
+        default=None,
+        help="Also save full bundle for refine-map / export-map",
+    )
+    rec_parser.add_argument(
+        "--export-dir",
+        type=str,
+        default=None,
+        help="Also run step-4 export (CSV + optional PLY) into this directory",
+    )
+    rec_parser.add_argument(
+        "--export-no-ply",
+        action="store_true",
+        help="With --export-dir: skip duplicate points.ply there",
+    )
+    rec_parser.add_argument(
+        "--export-observations-csv",
+        action="store_true",
+        help="With --export-dir: write observations.csv",
+    )
+    rec_parser.add_argument(
+        "--match-stats",
+        type=str,
+        default=None,
+        help="Optional: write step-1 consecutive-pair match statistics CSV",
+    )
+    rec_parser.add_argument(
+        "--no-undistort",
+        action="store_true",
+        help="Skip undistortion before features",
+    )
+    rec_parser.add_argument(
+        "--feature",
+        default="SIFT",
+        choices=["ORB", "SIFT", "KAZE"],
+        help="Feature detector",
+    )
+    rec_parser.add_argument(
+        "--preprocess",
+        default="none",
+        choices=["edges", "none"],
+        help="Preprocessing before detection",
+    )
+    rec_parser.add_argument(
+        "--pair-index",
+        type=int,
+        default=0,
+        help="Two-view seed frames i and i+1 (must be 0)",
+    )
+    rec_parser.add_argument(
+        "--ransac-prob",
+        type=float,
+        default=0.999,
+        help="Essential matrix RANSAC confidence",
+    )
+    rec_parser.add_argument(
+        "--ransac-threshold",
+        type=float,
+        default=1.0,
+        help="Essential matrix RANSAC threshold (px)",
+    )
+    rec_parser.add_argument(
+        "--pnp-reproj-threshold",
+        type=float,
+        default=8.0,
+        help="solvePnPRansac reprojection threshold (px)",
+    )
+    rec_parser.add_argument(
+        "--sync",
+        type=str,
+        default=None,
+        help="CSV/TSV with image,x,y for planar camera-center priors (steps 3–5)",
+    )
+    rec_parser.add_argument(
+        "--sync-default-weight",
+        type=float,
+        default=1.0,
+        help="Default prior weight when sync row has no weight/sigma",
+    )
+    rec_parser.add_argument(
+        "--no-bundle",
+        action="store_true",
+        help="Skip step-3 bundle adjustment (incremental geometry only)",
+    )
+    rec_parser.add_argument(
+        "--no-refine",
+        action="store_true",
+        help="Skip step-5 robust refinement",
+    )
+    rec_parser.add_argument(
+        "--refine-loss",
+        type=str,
+        default="soft_l1",
+        choices=["linear", "soft_l1", "huber", "cauchy", "arctan"],
+        help="Robust loss for refinement pass",
+    )
+    rec_parser.add_argument(
+        "--refine-f-scale",
+        type=float,
+        default=1.5,
+        help="Robust f_scale for refinement",
+    )
+    rec_parser.add_argument(
+        "--refine-max-nfev",
+        type=int,
+        default=0,
+        help="Max refinement iterations (0 = automatic)",
+    )
+    rec_parser.add_argument(
+        "--ba-verbose",
+        type=int,
+        default=0,
+        help="Verbosity for scipy least_squares (bundle + refine)",
+    )
+    rec_parser.set_defaults(func=run_reconstruct)
+
+    exp_parser = subparsers.add_parser(
+        "export-map",
+        help="Step 4: export cameras, points, reprojection stats from incremental NPZ",
+    )
+    exp_parser.add_argument(
+        "--input",
+        required=True,
+        type=str,
+        help="NPZ from incremental-sfm (save_incremental_npz)",
+    )
+    exp_parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=str,
+        help="Directory for CSV (and optional PLY) outputs",
+    )
+    exp_parser.add_argument(
+        "--no-ply",
+        action="store_true",
+        help="Skip writing points.ply",
+    )
+    exp_parser.add_argument(
+        "--observations-csv",
+        action="store_true",
+        help="Also write observations.csv (per keypoint reprojection errors; can be large)",
+    )
+    exp_parser.set_defaults(func=run_export_map)
+
+    ref_parser = subparsers.add_parser(
+        "refine-map",
+        help="Step 5: robust global BA on a saved NPZ (soft_l1/huber loss, optional sync)",
+    )
+    ref_parser.add_argument("--input", required=True, type=str, help="NPZ from incremental-sfm or prior refine")
+    ref_parser.add_argument("--output", required=True, type=str, help="Output NPZ path")
+    ref_parser.add_argument(
+        "--sync",
+        type=str,
+        default=None,
+        help="Optional CSV/TSV for (x,y) camera-center priors during refinement",
+    )
+    ref_parser.add_argument(
+        "--sync-default-weight",
+        type=float,
+        default=1.0,
+        help="Default prior weight when sync row has no weight/sigma",
+    )
+    ref_parser.add_argument(
+        "--loss",
+        type=str,
+        default="soft_l1",
+        choices=["linear", "soft_l1", "huber", "cauchy", "arctan"],
+        help="scipy least_squares robust loss (applies to all residuals)",
+    )
+    ref_parser.add_argument(
+        "--f-scale",
+        type=float,
+        default=1.5,
+        help="Robust scale (pixels-ish for reproj components); see SciPy docs",
+    )
+    ref_parser.add_argument(
+        "--max-nfev",
+        type=int,
+        default=0,
+        help="Max BA iterations (0 = automatic)",
+    )
+    ref_parser.add_argument(
+        "--ba-verbose",
+        type=int,
+        default=0,
+        help="scipy least_squares verbosity",
+    )
+    ref_parser.set_defaults(func=run_refine_map)
 
     return parser
 

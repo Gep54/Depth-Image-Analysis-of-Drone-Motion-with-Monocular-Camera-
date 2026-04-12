@@ -320,3 +320,26 @@ def save_incremental_npz(path: Path | str, result: IncrementalSfMResult, K: np.n
         K=np.asarray(K, dtype=np.float64),
         bundle_cost=-1.0 if result.bundle_cost is None else result.bundle_cost,
     )
+
+
+def load_incremental_npz(path: Path | str) -> tuple[IncrementalSfMResult, np.ndarray]:
+    """Reload a bundle written by :func:`save_incremental_npz`.
+
+    ``pnp_inliers_last_frame`` is set to ``-1`` (unknown when loading from disk).
+    """
+    z = np.load(Path(path), allow_pickle=True)
+    fn = z["frame_names"]
+    names = [str(x) for x in np.atleast_1d(fn).tolist()]
+    bc = float(z["bundle_cost"])
+    result = IncrementalSfMResult(
+        frame_names=names,
+        rvecs=np.asarray(z["rvecs"], dtype=np.float64),
+        tvecs=np.asarray(z["tvecs"], dtype=np.float64),
+        points_3d=np.asarray(z["points_3d"], dtype=np.float64),
+        colors_bgr=np.asarray(z["colors_bgr"], dtype=np.uint8),
+        observations=np.asarray(z["observations"], dtype=np.float64),
+        pnp_inliers_last_frame=-1,
+        bundle_cost=None if bc < 0 else bc,
+    )
+    K = np.asarray(z["K"], dtype=np.float64).reshape(3, 3)
+    return result, K

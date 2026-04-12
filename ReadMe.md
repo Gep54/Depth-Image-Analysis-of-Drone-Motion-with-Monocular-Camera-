@@ -10,6 +10,9 @@ A small Python app for image processing and feature matching, aimed at monocular
 - Two-view sparse reconstruction (essential matrix, triangulation, PLY/NPZ export)
 - Incremental multi-view SfM (PnP + triangulation) with optional bundle adjustment
 - Planar **(x, y)** priors on camera centers (optional sync table); **z** is never constrained
+- **Step 4** map export: camera trajectory CSV, sparse points CSV, per-frame reprojection report, optional PLY
+- **Step 5** robust global refinement: re-run joint BA with **soft_l1** / **huber** (etc.) on a saved NPZ
+- **`reconstruct`** — single command: frames + intrinsics + distortion → full chain → **3D point cloud (PLY)**
 - Camera calibration (chessboard helper)
 - Result visualization and export
 
@@ -34,6 +37,50 @@ Run commands from the `SeeDistanceMain` folder (so imports resolve):
 cd SeeDistanceMain
 python cli.py <subcommand> ...
 ```
+
+### One-command reconstruction (`reconstruct`)
+
+From a **folder of frames** (lexicographically ordered), **camera intrinsics `K`**, and optional **distortion** coefficients, run the full pipeline and get a **colored sparse point cloud** (PLY):
+
+1. *(Optional)* Step 1 — consecutive-pair match statistics CSV (`--match-stats`).
+2. Steps 2–3 — two-view seed, incremental PnP + triangulation, first bundle adjustment (with optional planar **x,y** sync priors).
+3. Step 5 — robust refinement (`soft_l1` by default; use `--no-refine` to skip).
+4. Writes **`--output-ply`** (required). Optionally **`--output-npz`**, and **`--export-dir`** for step-4 CSV diagnostics.
+
+**Minimal example**
+
+```bash
+cd SeeDistanceMain
+python cli.py reconstruct \
+  --frames-dir path/to/frames \
+  --intrinsics path/to/K.npy \
+  --output-ply map.ply
+```
+
+With **lens distortion** and saved bundle for later:
+
+```bash
+python cli.py reconstruct \
+  --frames-dir path/to/frames \
+  --intrinsics path/to/K.npy \
+  --dist path/to/dist.npy \
+  --output-ply map.ply \
+  --output-npz map.npz
+```
+
+With **sync** (planar camera centers) and **export** folder (cameras/points/reprojection CSV):
+
+```bash
+python cli.py reconstruct \
+  --frames-dir path/to/frames \
+  --intrinsics path/to/K.npy \
+  --dist path/to/dist.npy \
+  --sync path/to/sync.csv \
+  --output-ply map.ply \
+  --export-dir path/to/report_out
+```
+
+Requires **`scipy`** unless you pass **`--no-bundle`** and **`--no-refine`** (not recommended).
 
 ### Step 1 — Multi-image geometric foundation
 
@@ -183,14 +230,79 @@ python cli.py incremental-sfm --frames-dir path/to/frames --intrinsics path/K.np
 - `sync_priors.sync_xy_weight_per_frame`
 - `bundle_adjust_xy.bundle_adjust_multiview_xy_priors`
 
+### Step 4 — Map export and diagnostics
+
+After **step 3**, the NPZ bundle contains poses, 3D points, colors, observations, and `K`. Step 4 turns that into **reviewable artifacts** (no new optimization):
+
+| Output | Description |
+|--------|-------------|
+| `cameras.csv` | Per frame: **world camera center** `(center_x, center_y, center_z)` with `C = −Rᵀt`, plus `rvec` / `tvec` |
+| `points.csv` | Sparse landmarks: `point_id`, `x, y, z`, BGR color |
+| `reprojection_by_frame.csv` | Observation count and **RMS / mean / max** reprojection error (pixels) per frame |
+| `points.ply` | Same cloud as step 3 PLY (optional; use `--no-ply` to skip) |
+| `observations.csv` | Optional: every observation with `reproj_error_px` (`--observations-csv`; can be large) |
+
+**CLI**
+
+```bash
+cd SeeDistanceMain
+python cli.py export-map --input path/to/map.npz --output-dir path/to/export_folder
+```
+
+Skip PLY, add per-observation CSV:
+
+```bash
+python cli.py export-map --input map.npz --output-dir out --no-ply --observations-csv
+```
+
+**API**
+
+- `incremental_sfm.load_incremental_npz`
+- `sfm_export.export_incremental_map`, `sfm_export.reprojection_summary_by_frame`, `sfm_export.camera_centers_trajectory`
+
+### Step 5 — Robust global refinement
+
+Step 3’s first bundle adjustment uses a **linear** (L2) loss. Step 5 **reloads** an NPZ and runs **another** full joint optimization with a **robust** loss from SciPy (`soft_l1`, `huber`, `cauchy`, `arctan`, or `linear` again). Large reprojection errors (bad matches) or occasional bad sync rows are **down-weighted** relative to step 3.
+
+**Caveat:** `scipy.optimize.least_squares` applies the same `loss` to **every** residual, including **planar (x, y) priors**. Keep sync weights moderate, or use `linear` loss if priors must stay strictly quadratic.
+
+**Typical workflow**
+
+```bash
+python cli.py incremental-sfm ... --output-npz map.npz
+python cli.py refine-map --input map.npz --output map_refined.npz
+python cli.py export-map --input map_refined.npz --output-dir out
+```
+
+**CLI examples**
+
+Default robust pass (`soft_l1`, `f_scale=1.5`):
+
+```bash
+cd SeeDistanceMain
+python cli.py refine-map --input map.npz --output map_refined.npz
+```
+
+With sync priors during refinement and Huber loss:
+
+```bash
+python cli.py refine-map --input map.npz --output map_refined.npz --sync sync.csv --loss huber --f-scale 2.0
+```
+
+**API**
+
+- `refine_map.refine_incremental_bundle`
+- `bundle_adjust_xy.bundle_adjust_multiview_xy_priors` (`loss`, `f_scale` arguments)
+
 ### Other commands
 
+- `python cli.py reconstruct ...` — **end-to-end** pipeline (see above)
 - `python cli.py match --image1 ... --image2 ...` — match two images
 - `python cli.py calibrate` — chessboard calibration (paths are configured inside `camera_calibration.py`)
 
 ## Project structure
 
-- `SeeDistanceMain/` — main application code (`cli.py`, `data.py`, `mymatch.py`, `sequence_match.py`, `two_view.py`, `incremental_sfm.py`, `bundle_adjust_xy.py`, `sync_priors.py`, …)
+- `SeeDistanceMain/` — main application code (`cli.py`, `data.py`, `mymatch.py`, `sequence_match.py`, `two_view.py`, `incremental_sfm.py`, `bundle_adjust_xy.py`, `sync_priors.py`, `sfm_export.py`, `refine_map.py`, …)
 - `JupyterNotebooksPlayground/` — notebooks and generated outputs
 
 ## Notes
