@@ -8,6 +8,8 @@ import cv2 as cv
 import numpy as np
 from scipy.optimize import least_squares
 
+_VALID_LOSS = frozenset({"linear", "soft_l1", "huber", "cauchy", "arctan"})
+
 
 def camera_center_world(rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
     R, _ = cv.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
@@ -36,6 +38,8 @@ def bundle_adjust_multiview_xy_priors(
     *,
     max_nfev: int | None = None,
     verbose: int = 0,
+    loss: str = "linear",
+    f_scale: float = 1.0,
 ) -> BundleAdjustXYResult:
     """Least squares: reprojection + sqrt(w)*(C_x - x_prior), sqrt(w)*(C_y - y_prior).
 
@@ -52,6 +56,12 @@ def bundle_adjust_multiview_xy_priors(
         Shape ``(n_frames, 2)``. NaN rows / zero weight skip priors.
     prior_weight
         Shape ``(n_frames,)``.
+    loss
+        Passed to :func:`scipy.optimize.least_squares`. Use ``soft_l1`` or ``huber`` for
+        robust refinement (down-weights large residuals — reprojection **and** priors).
+    f_scale
+        Robust scale parameter for ``least_squares`` (see SciPy docs). For reprojection
+        residuals in pixels, values near **1–3** are a common starting range.
     """
     observations = np.asarray(observations, dtype=np.float64)
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
@@ -66,6 +76,11 @@ def bundle_adjust_multiview_xy_priors(
 
     if not np.allclose(rvecs[0], 0) or not np.allclose(tvecs[0], 0):
         raise ValueError("Frame 0 must be identity (rvec=0, tvec=0) for gauge fix")
+
+    if loss not in _VALID_LOSS:
+        raise ValueError(f"loss must be one of {sorted(_VALID_LOSS)}, got {loss!r}")
+    if f_scale <= 0:
+        raise ValueError("f_scale must be positive")
 
     fi = observations[:, 0].astype(int)
     pi = observations[:, 1].astype(int)
@@ -136,6 +151,8 @@ def bundle_adjust_multiview_xy_priors(
         method="trf",
         max_nfev=max_nfev,
         verbose=verbose,
+        loss=loss,
+        f_scale=float(f_scale),
     )
     unpack(ls.x)
 
